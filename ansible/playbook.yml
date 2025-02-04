@@ -1,0 +1,93 @@
+# **Ansible Playbook: Triển khai Fulcio, Rekór và Keycloak trong mạng nội bộ**
+
+- name: Triển khai Fulcio, Rekór và Keycloak
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Cài đặt Docker
+      apt:
+        name: docker.io
+        state: present
+        update_cache: yes
+
+    - name: Cài đặt Docker Compose
+      apt:
+        name: docker-compose
+        state: present
+        update_cache: yes
+
+    - name: Chạy Keycloak (OIDC Provider)
+      docker_container:
+        name: keycloak
+        image: quay.io/keycloak/keycloak:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:8080"
+        env:
+          KEYCLOAK_ADMIN: admin
+          KEYCLOAK_ADMIN_PASSWORD: admin
+        command: "start-dev"
+
+    - name: Tạo thư mục cấu hình Fulcio
+      file:
+        path: /opt/fulcio
+        state: directory
+        mode: '0755'
+
+    - name: Sao chép cấu hình Fulcio
+      copy:
+        dest: /opt/fulcio/config.yaml
+        content: |
+          OIDCIssuers:
+            - issuer: "http://keycloak.local:8080/realms/sigstore"
+              clientID: "fulcio"
+              type: "email"
+
+    - name: Chạy Fulcio
+      docker_container:
+        name: fulcio
+        image: ghcr.io/sigstore/fulcio:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "5555:5555"
+        volumes:
+          - "/opt/fulcio/config.yaml:/etc/fulcio-config.yaml"
+        command: "--config /etc/fulcio-config.yaml"
+
+    - name: Chạy Trillian Log Server
+      docker_container:
+        name: trillian-log-server
+        image: gcr.io/trillian-map-server
+        state: started
+        restart_policy: always
+        ports:
+          - "8090:8090"
+
+    - name: Chạy Rekór
+      docker_container:
+        name: rekor
+        image: ghcr.io/sigstore/rekor-server:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "3000:3000"
+        env:
+          REKOR_STORAGE_TYPE: "trillian"
+          TRILLIAN_LOG_SERVER: "http://trillian-log-server:8090"
+
+    - name: Cấu hình Cosign để sử dụng Fulcio và Rekór nội bộ
+      lineinfile:
+        path: /etc/environment
+        line: "{{ item }}"
+      loop:
+        - "SIGSTORE_FULCIO_URL=http://localhost:5555"
+        - "SIGSTORE_REKOR_URL=http://localhost:3000"
+        - "SIGSTORE_OIDC_ISSUER=http://keycloak.local:8080/realms/sigstore"
+
+    - name: Reload environment variables
+      shell: "source /etc/environment"
+      args:
+        executable: /bin/bash
